@@ -30,9 +30,23 @@ from blobfile._context import (
     create_context,
     default_log_fn,
 )
+from blobfile._custom_backend import CustomBackend
 
 default_context = create_context()
 
+def set_custom_backend_lookup_function(fn: Callable[[str], Optional[CustomBackend]]) -> None:
+    """For every one of its operations, tell the default context to call the 
+    given function to see if a CustomBackend exists to service the given path.
+
+    If one does, the given function should return a non-None CustomBackend
+    instance. In this case, the default context will use the CustomBackend
+    rather than its inbuilt local, GCS or AzureBlob functionality.
+
+    Do not call this function more than once. If you do so, it will raise an
+    exception.
+    """
+    global default_context
+    default_context.set_custom_backend_lookup(fn)
 
 def configure(
     *,

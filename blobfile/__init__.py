@@ -11,6 +11,7 @@ from blobfile._common import Stat as Stat
 from blobfile._common import VersionMismatch as VersionMismatch
 from blobfile._context import Context as Context
 from blobfile._context import create_context as create_context
+from blobfile._custom_backend import CustomBackend
 from blobfile._ops import BlobFile as BlobFile
 from blobfile._ops import basename as basename
 from blobfile._ops import configure as configure
@@ -32,6 +33,7 @@ from blobfile._ops import rmdir as rmdir
 from blobfile._ops import rmtree as rmtree
 from blobfile._ops import scandir as scandir
 from blobfile._ops import scanglob as scanglob
+from blobfile._ops import set_custom_backend_lookup_function
 from blobfile._ops import set_mtime as set_mtime
 from blobfile._ops import stat as stat
 from blobfile._ops import walk as walk
@@ -47,6 +49,7 @@ __all__ = [
     "exists",
     "glob",
     "scanglob",
+    "set_custom_backend_lookup_function",
     "isdir",
     "listdir",
     "scandir",
@@ -64,6 +67,7 @@ __all__ = [
     "set_mtime",
     "configure",
     "BlobFile",
+    "CustomBackend",
     "Request",
     "Error",
     "RequestFailure",

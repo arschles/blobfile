@@ -26,6 +26,7 @@ from typing import (
     Iterator,
     List,
     Literal,
+    Mapping,
     NamedTuple,
     Optional,
     Sequence,
@@ -41,6 +42,7 @@ import urllib3
 
 from blobfile import _azure as azure
 from blobfile import _common as common
+from blobfile._custom_backend import CustomBackend
 from blobfile import _gcp as gcp
 from blobfile._common import (
     CHUNK_SIZE,
@@ -75,9 +77,37 @@ def _execute_fn_and_ignore_result(fn: Callable[..., object], *args: Any):
 
 
 class Context:
-    def __init__(self, conf: Config):
-        self._conf = conf
+    _backend_lookup_fn: Optional[Callable[[str], Optional[CustomBackend]]]
+    """
+    Lookup function to determine whether a custom backend should service 
+    a given path.
 
+    Only settable once on a given Context object.
+    """
+
+    def __init__(
+        self,
+        conf: Config,
+        custom_backend_lookup_fn: Optional[Callable[[str], Optional[CustomBackend]]] = None,
+    ):
+        self._conf = conf
+        self._backend_lookup_fn = custom_backend_lookup_fn
+    
+    def set_custom_backend_lookup(self, lookup: Callable[[str], Optional[CustomBackend]]) -> None:
+        """
+        Define a function that can look up a custom backend for a given path.
+
+        Do not call this function more than once per Context instance. If you
+        do so, it will raise an exception.
+        """
+        if self._backend_lookup_fn is not None:
+            raise ValueError("attempted to set backend lookup function when one was already set")
+        self._backend_lookup_fn = lookup
+
+    def _lookup_backend(self, path: str) -> Optional[CustomBackend]:
+        return self._backend_lookup_fn(path) if self._backend_lookup_fn else None
+
+    # TODO: add custom backend support here
     def copy(
         self,
         src: RemoteOrLocalPath,
@@ -181,7 +211,10 @@ class Context:
 
     def exists(self, path: RemoteOrLocalPath) -> bool:
         path = path_to_str(path)
-        if _is_local_path(path):
+        backend = self._lookup_backend(path)
+        if backend:
+            return backend.exists(path)
+        elif _is_local_path(path):
             return os.path.exists(path)
         elif _is_gcp_path(path):
             st = gcp.maybe_stat(self._conf, path)
@@ -219,12 +252,12 @@ class Context:
             for entry in self.scanglob(pattern=pattern, parallel=parallel):
                 yield entry.path
 
+    # TODO: custom backend
     def scanglob(
         self, pattern: str, parallel: bool = False, shard_prefix_length: int = 0
     ) -> Iterator[DirEntry]:
         if "?" in pattern or "[" in pattern or "]" in pattern:
             raise Error("Advanced glob queries are not supported")
-
         if _is_local_path(pattern):
             for filepath in _local_glob(pattern):
                 # doing a stat call for each file isn't the most efficient
@@ -330,7 +363,10 @@ class Context:
 
     def isdir(self, path: RemoteOrLocalPath) -> bool:
         path = path_to_str(path)
-        if _is_local_path(path):
+        backend = self._lookup_backend(path)
+        if backend:
+            return backend.isdir(path)
+        elif _is_local_path(path):
             return os.path.isdir(path)
         elif _is_gcp_path(path):
             return gcp.isdir(self._conf, path)
@@ -346,13 +382,18 @@ class Context:
 
     def scandir(self, path: RemoteOrLocalPath, shard_prefix_length: int = 0) -> Iterator[DirEntry]:
         path = path_to_str(path)
-        if (_is_gcp_path(path) or _is_azure_path(path)) and not path.endswith("/"):
+        backend = self._lookup_backend(path)
+        is_custom = backend is not None
+        
+        if (is_custom or _is_gcp_path(path) or _is_azure_path(path)) and not path.endswith("/"):
             path += "/"
         if not self.exists(path):
             raise FileNotFoundError(f"The system cannot find the path specified: '{path}'")
         if not self.isdir(path):
             raise NotADirectoryError(f"The directory name is invalid: '{path}'")
-        if _is_local_path(path):
+        if backend:
+            yield from backend.scandir(path, shard_prefix_length=shard_prefix_length)
+        elif _is_local_path(path):
             for de in os.scandir(path):
                 if de.is_dir():
                     yield DirEntry(
@@ -417,7 +458,10 @@ class Context:
 
     def makedirs(self, path: RemoteOrLocalPath) -> None:
         path = path_to_str(path)
-        if _is_local_path(path):
+        backend = self._lookup_backend(path)
+        if backend:
+            return backend.makedirs(path)
+        elif _is_local_path(path):
             os.makedirs(path, exist_ok=True)
         elif _is_gcp_path(path):
             gcp.mkdirfile(self._conf, path)
@@ -428,7 +472,10 @@ class Context:
 
     def remove(self, path: RemoteOrLocalPath) -> None:
         path = path_to_str(path)
-        if _is_local_path(path):
+        backend = self._lookup_backend(path)
+        if backend:
+            return backend.remove(path)
+        elif _is_local_path(path):
             os.remove(path)
         elif _is_gcp_path(path):
             if path.endswith("/"):
@@ -447,7 +494,10 @@ class Context:
 
     def rmdir(self, path: RemoteOrLocalPath) -> None:
         path = path_to_str(path)
-        if _is_local_path(path):
+        backend = self._lookup_backend(path)
+        if backend:
+            return self.rmdir(path)
+        elif _is_local_path(path):
             os.rmdir(path)
             return
 
@@ -461,8 +511,7 @@ class Context:
         # not exist, but is still an error to delete a non-empty one
         if not path.endswith("/"):
             path += "/"
-
-        if _is_gcp_path(path):
+        elif _is_gcp_path(path):
             _, blob = gcp.split_path(path)
         elif _is_azure_path(path):
             _, _, blob = azure.split_path(path)
@@ -505,7 +554,10 @@ class Context:
 
     def stat(self, path: RemoteOrLocalPath) -> Stat:
         path = path_to_str(path)
-        if _is_local_path(path):
+        backend = self._lookup_backend(path)
+        if backend:
+            return self.stat(path)
+        elif _is_local_path(path):
             s = os.stat(path)
             return Stat(size=s.st_size, mtime=s.st_mtime, ctime=s.st_ctime, md5=None, version=None)
         elif _is_gcp_path(path):
@@ -525,7 +577,10 @@ class Context:
         self, path: RemoteOrLocalPath, mtime: float, version: Optional[str] = None
     ) -> bool:
         path = path_to_str(path)
-        if _is_local_path(path):
+        backend = self._lookup_backend(path)
+        if backend:
+            return self.set_mtime(path, mtime=mtime, version=version)
+        elif _is_local_path(path):
             assert version is None
             os.utime(path, times=(mtime, mtime))
             return True
@@ -545,8 +600,14 @@ class Context:
         path = path_to_str(path)
         if not self.isdir(path):
             raise NotADirectoryError(f"The directory name is invalid: '{path}'")
-
-        if _is_local_path(path):
+        backend = self._lookup_backend(path)
+        if backend:
+            return backend.rmtree(
+                path=path,
+                parallel=parallel,
+                parallel_executor=parallel_executor,
+            )
+        elif _is_local_path(path):
             shutil.rmtree(path)
         elif _is_gcp_path(path) or _is_azure_path(path):
             if not path.endswith("/"):
